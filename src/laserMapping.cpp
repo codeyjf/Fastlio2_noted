@@ -96,9 +96,9 @@ bool   lidar_pushed, flg_first_scan = true, flg_exit = false, flg_EKF_inited;
 bool   scan_pub_en = false, dense_pub_en = false, scan_body_pub_en = false;
 int lidar_type;
 
-vector<vector<int>>  pointSearchInd_surf; 
+vector<vector<int>>  pointSearchInd_surf;
 vector<BoxPointType> cub_needrm;
-vector<PointVector>  Nearest_Points; 
+vector<PointVector>  Nearest_Points;
 vector<double>       extrinT(3, 0.0);
 vector<double>       extrinR(9, 0.0);
 deque<double>                     time_buffer;
@@ -234,8 +234,10 @@ void lasermap_fov_segment()
     kdtree_delete_counter = 0;
     kdtree_delete_time = 0.0;    
     pointBodyToWorld(XAxisPoint_body, XAxisPoint_world);
+    // 获取当前LiDAR在世界坐标系下的位置
     V3D pos_LiD = pos_lid;
-    if (!Localmap_Initialized){
+    if (!Localmap_Initialized){// 如果局部地图还未初始化
+        // 以当前LiDAR位置为中心，创建一个边长为 cube_len 的立方体 作为局部地图的初始范围
         for (int i = 0; i < 3; i++){
             LocalMap_Points.vertex_min[i] = pos_LiD(i) - cube_len / 2.0;
             LocalMap_Points.vertex_max[i] = pos_LiD(i) + cube_len / 2.0;
@@ -245,15 +247,18 @@ void lasermap_fov_segment()
     }
     float dist_to_map_edge[3][2];
     bool need_move = false;
+    //比较xyz三个方向的与目前局部地图边界的距离，判断当前局部地图窗口是否需要更新
     for (int i = 0; i < 3; i++){
         dist_to_map_edge[i][0] = fabs(pos_LiD(i) - LocalMap_Points.vertex_min[i]);
         dist_to_map_edge[i][1] = fabs(pos_LiD(i) - LocalMap_Points.vertex_max[i]);
         if (dist_to_map_edge[i][0] <= MOV_THRESHOLD * DET_RANGE || dist_to_map_edge[i][1] <= MOV_THRESHOLD * DET_RANGE) need_move = true;
     }
-    if (!need_move) return;
-    BoxPointType New_LocalMap_Points, tmp_boxpoints;
+    if (!need_move) return;//不需要移动就返回
+    //如果需要移动局部地图窗口，就滑动窗口
+    BoxPointType New_LocalMap_Points, tmp_boxpoints;//tmp_boxpoints维护的是待删除的立方体区域
     New_LocalMap_Points = LocalMap_Points;
-    float mov_dist = max((cube_len - 2.0 * MOV_THRESHOLD * DET_RANGE) * 0.5 * 0.9, double(DET_RANGE * (MOV_THRESHOLD -1)));
+    float mov_dist = max((cube_len - 2.0 * MOV_THRESHOLD * DET_RANGE) * 0.5 * 0.9, double(DET_RANGE * (MOV_THRESHOLD -1)));//合适的、固定的滑动步长
+    //再按照三个方向目前的间距，根据实际进行滑动
     for (int i = 0; i < 3; i++){
         tmp_boxpoints = LocalMap_Points;
         if (dist_to_map_edge[i][0] <= MOV_THRESHOLD * DET_RANGE){
@@ -265,11 +270,12 @@ void lasermap_fov_segment()
             New_LocalMap_Points.vertex_max[i] += mov_dist;
             New_LocalMap_Points.vertex_min[i] += mov_dist;
             tmp_boxpoints.vertex_max[i] = LocalMap_Points.vertex_min[i] + mov_dist;
-            cub_needrm.push_back(tmp_boxpoints);
+            cub_needrm.push_back(tmp_boxpoints);//这里避免了删除不足，也确实会重复添加交集区域
         }
     }
-    LocalMap_Points = New_LocalMap_Points;
+    LocalMap_Points = New_LocalMap_Points;//更新新的局部地图窗口
 
+    //删除多余的点
     points_cache_collect();
     double delete_begin = omp_get_wtime();
     if(cub_needrm.size() > 0) kdtree_delete_counter = ikdtree.Delete_Point_Boxes(cub_needrm);
@@ -372,23 +378,29 @@ bool sync_packages(MeasureGroup &meas)
     }
 
     /*** push a lidar scan ***/
+    // lidar_pushed 是一个标志位，确保在一次成功的同步完成前，我们只处理固定的某一帧LiDAR。
     if(!lidar_pushed)
     {
+        // 从缓冲区获取最老的一帧LiDAR数据开始时间戳
         meas.lidar = lidar_buffer.front();
         meas.lidar_beg_time = time_buffer.front();
 
 
         if (meas.lidar->points.size() <= 1) // time too little
         {
+            // 如果点云点数太少 使用一个历史平均扫描时间 lidar_mean_scantime 作为估计的持续时间。
             lidar_end_time = meas.lidar_beg_time + lidar_mean_scantime;
             ROS_WARN("Too few input point cloud!\n");
         }
         else if (meas.lidar->points.back().curvature / double(1000) < 0.5 * lidar_mean_scantime)
         {
+            // 如果最后一个点的时间戳小于平均扫描时间的一半，说明这可能是一帧不完整的扫描。
+            // Livox点云中，每个点都带有相对于扫描开始的时间戳，存储在 curvature 字段。
             lidar_end_time = meas.lidar_beg_time + lidar_mean_scantime;
         }
         else
         {
+            // 同样使用历史平均扫描时间作为兜底
             scan_num ++;
             lidar_end_time = meas.lidar_beg_time + meas.lidar->points.back().curvature / double(1000);
             lidar_mean_scantime += (meas.lidar->points.back().curvature / double(1000) - lidar_mean_scantime) / scan_num;
@@ -401,8 +413,11 @@ bool sync_packages(MeasureGroup &meas)
         lidar_pushed = true;
     }
 
+    // 检查IMU数据是否足够 保证IMU数据要cover整个LiDAR扫描的时间段，IMU采集频率更高
     if (last_timestamp_imu < lidar_end_time)
     {
+        // 如果IMU缓冲区中最新的时间戳仍然早于我们“锁定”的LiDAR扫描的结束时间，
+        // 说明覆盖整个LiDAR扫描时长的IMU数据还没有全部到达
         return false;
     }
 
@@ -647,7 +662,7 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
         omp_set_num_threads(MP_PROC_NUM);
         #pragma omp parallel for
     #endif
-    for (int i = 0; i < feats_down_size; i++)
+    for (int i = 0; i < feats_down_size; i++)//利用当前状态量(预测的相对位姿)对每个点进行处理，变换到世界坐标系下
     {
         PointType &point_body  = feats_down_body->points[i]; 
         PointType &point_world = feats_down_world->points[i]; 
@@ -758,40 +773,54 @@ int main(int argc, char** argv)
     ros::init(argc, argv, "laserMapping");
     ros::NodeHandle nh;
 
-    nh.param<bool>("publish/path_en",path_en, true);
-    nh.param<bool>("publish/scan_publish_en",scan_pub_en, true);
-    nh.param<bool>("publish/dense_publish_en",dense_pub_en, true);
-    nh.param<bool>("publish/scan_bodyframe_pub_en",scan_body_pub_en, true);
-    nh.param<int>("max_iteration",NUM_MAX_ITERATIONS,4);
-    nh.param<string>("map_file_path",map_file_path,"");
-    nh.param<string>("common/lid_topic",lid_topic,"/livox/lidar");
-    nh.param<string>("common/imu_topic", imu_topic,"/livox/imu");
-    nh.param<bool>("common/time_sync_en", time_sync_en, false);
-    nh.param<double>("common/time_offset_lidar_to_imu", time_diff_lidar_to_imu, 0.0);
-    nh.param<double>("filter_size_corner",filter_size_corner_min,0.5);
-    nh.param<double>("filter_size_surf",filter_size_surf_min,0.5);
-    nh.param<double>("filter_size_map",filter_size_map_min,0.5);
-    nh.param<double>("cube_side_length",cube_len,200);
-    nh.param<float>("mapping/det_range",DET_RANGE,300.f);
-    nh.param<double>("mapping/fov_degree",fov_deg,180);
-    nh.param<double>("mapping/gyr_cov",gyr_cov,0.1);
-    nh.param<double>("mapping/acc_cov",acc_cov,0.1);
-    nh.param<double>("mapping/b_gyr_cov",b_gyr_cov,0.0001);
-    nh.param<double>("mapping/b_acc_cov",b_acc_cov,0.0001);
-    nh.param<double>("preprocess/blind", p_pre->blind, 0.01);
-    nh.param<int>("preprocess/lidar_type", lidar_type, AVIA);
-    nh.param<int>("preprocess/scan_line", p_pre->N_SCANS, 16);
-    nh.param<int>("preprocess/timestamp_unit", p_pre->time_unit, US);
-    nh.param<int>("preprocess/scan_rate", p_pre->SCAN_RATE, 10);
-    nh.param<int>("point_filter_num", p_pre->point_filter_num, 2);
-    nh.param<bool>("feature_extract_enable", p_pre->feature_enabled, false);
-    nh.param<bool>("runtime_pos_log_enable", runtime_pos_log, 0);
-    nh.param<bool>("mapping/extrinsic_est_en", extrinsic_est_en, true);
-    nh.param<bool>("pcd_save/pcd_save_en", pcd_save_en, false);
-    nh.param<int>("pcd_save/interval", pcd_save_interval, -1);
-    nh.param<vector<double>>("mapping/extrinsic_T", extrinT, vector<double>());
-    nh.param<vector<double>>("mapping/extrinsic_R", extrinR, vector<double>());
+    // --- 发布相关的开关 ---
+    nh.param<bool>("publish/path_en",path_en, true); // 是否发布路径信息
+    nh.param<bool>("publish/scan_publish_en",scan_pub_en, true); // 是否发布配准后的点云
+    nh.param<bool>("publish/dense_publish_en",dense_pub_en, true); // 如果发布点云，是否发布稠密的原始点云
+    nh.param<bool>("publish/scan_bodyframe_pub_en",scan_body_pub_en, true); // 是否发布body坐标系下的点云
 
+    // --- 算法核心参数 ---
+    nh.param<int>("max_iteration",NUM_MAX_ITERATIONS,4); // ESEKF的最大迭代次数
+    nh.param<string>("map_file_path",map_file_path,""); // 地图文件的路径（用于加载/保存）
+    nh.param<string>("common/lid_topic",lid_topic,"/livox/lidar"); // 订阅的LiDAR话题名
+    nh.param<string>("common/imu_topic", imu_topic,"/livox/imu"); // 订阅的IMU话题名
+    nh.param<bool>("common/time_sync_en", time_sync_en, false); // 是否启用时间戳自动同步
+    nh.param<double>("common/time_offset_lidar_to_imu", time_diff_lidar_to_imu, 0.0); // 手动设置的LiDAR到IMU的时间戳偏移
+
+    // --- 点云滤波参数 ---
+    nh.param<double>("filter_size_corner",filter_size_corner_min,0.5); // 角点滤波尺寸（在FAST-LIO中通常不使用）
+    nh.param<double>("filter_size_surf",filter_size_surf_min,0.5); // 输入点云的体素滤波尺寸
+    nh.param<double>("filter_size_map",filter_size_map_min,0.5); // 地图点云的体素滤波尺寸
+
+    // --- 地图管理参数 ---
+    nh.param<double>("cube_side_length",cube_len,200); // ikd-Tree维护的局部地图立方体的边长
+    nh.param<float>("mapping/det_range",DET_RANGE,300.f); // 最大探测距离
+    nh.param<double>("mapping/fov_degree",fov_deg,180); // LiDAR的视场角（FOV）
+
+    // --- ESEKF噪声和外参参数 (紧耦合的核心) ---
+    nh.param<double>("mapping/gyr_cov",gyr_cov,0.1); // IMU陀螺仪的噪声协方差
+    nh.param<double>("mapping/acc_cov",acc_cov,0.1); // IMU加速度计的噪声协方差
+    nh.param<double>("mapping/b_gyr_cov",b_gyr_cov,0.0001); // IMU陀螺仪偏置的噪声协方差
+    nh.param<double>("mapping/b_acc_cov",b_acc_cov,0.0001); // IMU加速度计偏置的噪声协方差
+    nh.param<bool>("mapping/extrinsic_est_en", extrinsic_est_en, true); // 是否在线估计外参（LiDAR和IMU之间的变换）
+
+    // --- 预处理参数 ---
+    nh.param<double>("preprocess/blind", p_pre->blind, 0.01); // 最小探测距离（盲区）
+    nh.param<int>("preprocess/lidar_type", lidar_type, AVIA); // LiDAR类型 (如 Avia, Velodyne等)
+    nh.param<int>("preprocess/scan_line", p_pre->N_SCANS, 16); // LiDAR线数
+    nh.param<int>("preprocess/timestamp_unit", p_pre->time_unit, US); // 点云中时间戳的单位（纳秒/微秒）
+    nh.param<int>("preprocess/scan_rate", p_pre->SCAN_RATE, 10); // LiDAR扫描频率
+    nh.param<int>("point_filter_num", p_pre->point_filter_num, 2); // 预处理中过滤掉的点数
+    nh.param<bool>("feature_extract_enable", p_pre->feature_enabled, false); // 是否启用特征提取（FAST-LIO中为false）
+
+    // --- 日志和PCD保存参数 ---
+    nh.param<bool>("runtime_pos_log_enable", runtime_pos_log, 0); // 是否启用运行时位置日志
+    nh.param<bool>("pcd_save/pcd_save_en", pcd_save_en, false); // 是否保存PCD地图
+    nh.param<int>("pcd_save/interval", pcd_save_interval, -1); // 保存PCD的间隔帧数
+    nh.param<vector<double>>("mapping/extrinsic_T", extrinT, vector<double>()); // LiDAR到IMU的平移外参
+    nh.param<vector<double>>("mapping/extrinsic_R", extrinR, vector<double>()); // LiDAR到IMU的旋转外参
+
+    // 对象和变量初始化
     p_pre->lidar_type = lidar_type;
     cout<<"p_pre->lidar_type "<<p_pre->lidar_type<<endl;
     
@@ -803,11 +832,11 @@ int main(int argc, char** argv)
     double deltaT, deltaR, aver_time_consu = 0, aver_time_icp = 0, aver_time_match = 0, aver_time_incre = 0, aver_time_solve = 0, aver_time_const_H_time = 0;
     bool flg_EKF_converged, EKF_stop_flg = 0;
     
-    FOV_DEG = (fov_deg + 10.0) > 179.9 ? 179.9 : (fov_deg + 10.0);
+    FOV_DEG = (fov_deg + 10.0) > 179.9 ? 179.9 : (fov_deg + 10.0);//给imu估计的位姿的更大一些的视场角，用于在当前地图中抠出局部地图，用于和当前雷达帧匹配
     HALF_FOV_COS = cos((FOV_DEG) * 0.5 * PI_M / 180.0);
 
-    _featsArray.reset(new PointCloudXYZI());
-
+    // --- 初始化各种点云指针和滤波器 ---
+    _featsArray.reset(new PointCloudXYZI());//创建新的对象指针
     memset(point_selected_surf, true, sizeof(point_selected_surf));
     memset(res_last, -1000.0f, sizeof(res_last));
     downSizeFilterSurf.setLeafSize(filter_size_surf_min, filter_size_surf_min, filter_size_surf_min);
@@ -815,6 +844,8 @@ int main(int argc, char** argv)
     memset(point_selected_surf, true, sizeof(point_selected_surf));
     memset(res_last, -1000.0f, sizeof(res_last));
 
+    // --- 设置IMU处理器和ESEKF ---
+    // 将外参(R, T)和噪声协方差设置给IMU处理器对象    
     Lidar_T_wrt_IMU<<VEC_FROM_ARRAY(extrinT);
     Lidar_R_wrt_IMU<<MAT_FROM_ARRAY(extrinR);
     p_imu->set_extrinsic(Lidar_T_wrt_IMU, Lidar_R_wrt_IMU);
@@ -823,10 +854,15 @@ int main(int argc, char** argv)
     p_imu->set_gyr_bias_cov(V3D(b_gyr_cov, b_gyr_cov, b_gyr_cov));
     p_imu->set_acc_bias_cov(V3D(b_acc_cov, b_acc_cov, b_acc_cov));
     p_imu->lidar_type = lidar_type;
+
+    // --- 初始化ESEKF（误差状态迭代卡尔曼滤波） ---
+    // 定义迭代终止的阈值
     double epsi[23] = {0.001};
     fill(epsi, epsi+23, 0.001);
+    // 初始化滤波器，传入状态转移函数(get_f, df_dx, df_dw)和观测函数(h_share_model)
     kf.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
 
+    // 日志文件设置
     /*** debug record ***/
     FILE *fp;
     string pos_log_dir = root_dir + "/Log/pos_log.txt";
@@ -859,16 +895,16 @@ int main(int argc, char** argv)
     ros::Publisher pubPath          = nh.advertise<nav_msgs::Path> 
             ("/path", 100000);
 //------------------------------------------------------------------------------------------------------
-    signal(SIGINT, SigHandle);
-    ros::Rate rate(5000);
+    signal(SIGINT, SigHandle);// 注册一个信号处理器，用于退出程序（例如按下Ctrl+C）
+    ros::Rate rate(5000);// 设置一个循环频率，但在这里5000Hz非常高，实际循环速度由数据驱动
     bool status = ros::ok();
     while (status)
     {
         if (flg_exit) break;
-        ros::spinOnce();
-        if(sync_packages(Measures)) 
+        ros::spinOnce();// 处理所有挂起的回调函数（即接收ROS消息）
+        if(sync_packages(Measures)) //打包当前LiDAR和IMU数据，作为一个测量组，包含多帧对其的数据
         {
-            if (flg_first_scan)
+            if (flg_first_scan)// --- 处理第一帧，仅记录开始时间 ---
             {
                 first_lidar_time = Measures.lidar_beg_time;
                 p_imu->first_lidar_time = first_lidar_time;
@@ -876,8 +912,9 @@ int main(int argc, char** argv)
                 continue;
             }
 
+                   
             double t0,t1,t2,t3,t4,t5,match_start, solve_start, svd_time;
-
+            //统计时间
             match_time = 0;
             kdtree_search_time = 0.0;
             solve_time = 0;
@@ -885,7 +922,12 @@ int main(int argc, char** argv)
             svd_time   = 0;
             t0 = omp_get_wtime();
 
-            p_imu->Process(Measures, kf, feats_undistort);
+            // IMU处理与运动畸变校正 
+            // 调用IMU处理器的Process函数，它会：
+            // a. 对IMU数据进行前向传播（预测），得到一个先验状态。
+            // b. 利用高频的IMU位姿对LiDAR点云进行运动畸变校正。    
+            p_imu->Process(Measures, kf, feats_undistort);//统一点云时间到Measures的结束时间
+            // 获取IMU预测后的状态，作为当前帧的位姿先验
             state_point = kf.get_x();
             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
 
@@ -895,33 +937,38 @@ int main(int argc, char** argv)
                 continue;
             }
 
+            // 判断EKF是否已经初始化
             flg_EKF_inited = (Measures.lidar_beg_time - first_lidar_time) < INIT_TIME ? \
                             false : true;
             /*** Segment the map in lidar FOV ***/
-            lasermap_fov_segment();
+            lasermap_fov_segment();//更新局部地图的滑动窗口，抠出局部地图
 
             /*** downsample the feature points in a scan ***/
+            //对这个当前帧进行降采样
             downSizeFilterSurf.setInputCloud(feats_undistort);
             downSizeFilterSurf.filter(*feats_down_body);
             t1 = omp_get_wtime();
             feats_down_size = feats_down_body->points.size();
             /*** initialize the map kdtree ***/
+            //如果还没建立的话就初始化地图kdtree
             if(ikdtree.Root_Node == nullptr)
             {
                 if(feats_down_size > 5)
                 {
-                    ikdtree.set_downsample_param(filter_size_map_min);
-                    feats_down_world->resize(feats_down_size);
+                    //对地图降采样
+                    ikdtree.set_downsample_param(filter_size_map_min);// 设置ikd-Tree内部的降采样参数 filter_size_map_min体素大小 yaml参数
+                    feats_down_world->resize(feats_down_size);// 为世界坐标系下的点云分配内存
                     for(int i = 0; i < feats_down_size; i++)
                     {
                         pointBodyToWorld(&(feats_down_body->points[i]), &(feats_down_world->points[i]));
                     }
+                    // 使用第一帧的世界坐标系点云构建ikd-Tree
                     ikdtree.Build(feats_down_world->points);
                 }
                 continue;
             }
-            int featsFromMapNum = ikdtree.validnum();
-            kdtree_size_st = ikdtree.size();
+            int featsFromMapNum = ikdtree.validnum();//获取地图中有效点的数量
+            kdtree_size_st = ikdtree.size();//获取地图树结构的总节点数
             
             // cout<<"[ mapping ]: In num: "<<feats_undistort->points.size()<<" downsamp "<<feats_down_size<<" Map num: "<<featsFromMapNum<<"effect num:"<<effct_feat_num<<endl;
 
@@ -931,10 +978,12 @@ int main(int argc, char** argv)
                 ROS_WARN("No point, skip this scan!\n");
                 continue;
             }
-            
+
+            // 为存储法向量和世界坐标系点云的容器预分配内存
             normvec->resize(feats_down_size);
             feats_down_world->resize(feats_down_size);
 
+            // 将优化前的状态（先验状态）写入日志文件
             V3D ext_euler = SO3ToEuler(state_point.offset_R_L_I);
             fout_pre<<setw(20)<<Measures.lidar_beg_time - first_lidar_time<<" "<<euler_cur.transpose()<<" "<< state_point.pos.transpose()<<" "<<ext_euler.transpose() << " "<<state_point.offset_T_L_I.transpose()<< " " << state_point.vel.transpose() \
             <<" "<<state_point.bg.transpose()<<" "<<state_point.ba.transpose()<<" "<<state_point.grav<< endl;
@@ -947,6 +996,7 @@ int main(int argc, char** argv)
                 featsFromMap->points = ikdtree.PCL_Storage;
             }
 
+            // 为存储最近邻搜索结果的容器预分配内存
             pointSearchInd_surf.resize(feats_down_size);
             Nearest_Points.resize(feats_down_size);
             int  rematch_num = 0;
@@ -954,11 +1004,12 @@ int main(int argc, char** argv)
 
             t2 = omp_get_wtime();
             
-            /*** iterated state estimation ***/
+            /*** iterated state estimation ***///迭代状态估计 (ESEKF Update)
             double t_update_start = omp_get_wtime();
             double solve_H_time = 0;
-            kf.update_iterated_dyn_share_modified(LASER_POINT_COV, solve_H_time);
-            state_point = kf.get_x();
+            kf.update_iterated_dyn_share_modified(LASER_POINT_COV, solve_H_time);// 执行ESEKF的更新步骤
+            state_point = kf.get_x();// 获取优化后的状态（后验状态）h_share_model回调就读取了feats_down_size
+            // 更新与优化后状态相关的变量
             euler_cur = SO3ToEuler(state_point.rot);
             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
             geoQuat.x = state_point.rot.coeffs()[0];
@@ -1008,8 +1059,11 @@ int main(int argc, char** argv)
                 time_log_counter ++;
                 printf("[ mapping ]: time: IMU + Map + Input Downsample: %0.6f ave match: %0.6f ave solve: %0.6f  ave ICP: %0.6f  map incre: %0.6f ave total: %0.6f icp: %0.6f construct H: %0.6f \n",t1-t0,aver_time_match,aver_time_solve,t3-t1,t5-t3,aver_time_consu,aver_time_icp, aver_time_const_H_time);
                 ext_euler = SO3ToEuler(state_point.offset_R_L_I);
-                fout_out << setw(20) << Measures.lidar_beg_time - first_lidar_time << " " << euler_cur.transpose() << " " << state_point.pos.transpose()<< " " << ext_euler.transpose() << " "<<state_point.offset_T_L_I.transpose()<<" "<< state_point.vel.transpose() \
-                <<" "<<state_point.bg.transpose()<<" "<<state_point.ba.transpose()<<" "<<state_point.grav<<" "<<feats_undistort->points.size()<<endl;
+                // fout_out << setw(20) << Measures.lidar_beg_time - first_lidar_time << " " << euler_cur.transpose() << " " << state_point.pos.transpose()<< " " << ext_euler.transpose() << " "<<state_point.offset_T_L_I.transpose()<<" "<< state_point.vel.transpose() \
+                // <<" "<<state_point.bg.transpose()<<" "<<state_point.ba.transpose()<<" "<<state_point.grav<<" "<<feats_undistort->points.size()<<endl;
+                fout_out << std::fixed << std::setprecision(6) << Measures.lidar_beg_time << " "
+                        << state_point.pos(0) << " " << state_point.pos(1) << " " << state_point.pos(2) << " "
+                        << geoQuat.x << " " << geoQuat.y << " " << geoQuat.z << " " << geoQuat.w << std::endl;//保存tum格式的位姿
                 dump_lio_state_to_log(fp);
             }
         }
