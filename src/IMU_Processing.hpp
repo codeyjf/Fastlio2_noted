@@ -260,7 +260,7 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
 
   input_ikfom in;// 定义卡尔曼滤波器的输入（加速度和角速度）
   // 遍历IMU队列，每次处理两个相邻的IMU读数。 这是算法的“预测”步骤 中间位姿保存到IMUpose
-  for (auto it_imu = v_imu.begin(); it_imu < (v_imu.end() - 1); it_imu++)
+  for (auto it_imu = v_imu.begin(); it_imu < (v_imu.end() - 1); it_imu++)//通过中值积分预估每个IMU时刻的世界位姿
   {
     auto &&head = *(it_imu);
     auto &&tail = *(it_imu + 1);
@@ -318,7 +318,7 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
   //这次预测是为了让滤波器的状态与点云的结束时间对齐，大部分dt都是代表了pcl_end_time - imu_end_time，即大部分都是: 最后一帧IMU数据在LiDAR扫描结束之前到达。
   double note = pcl_end_time > imu_end_time ? 1.0 : -1.0;
   dt = note * (pcl_end_time - imu_end_time);
-  kf_state.predict(dt, Q, in);
+  kf_state.predict(dt, Q, in);//再往后预测一次
   
   imu_state = kf_state.get_x();
   last_imu_ = meas.imu.back();

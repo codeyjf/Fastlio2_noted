@@ -925,9 +925,9 @@ int main(int argc, char** argv)
             // IMU处理与运动畸变校正 
             // 调用IMU处理器的Process函数，它会：
             // a. 对IMU数据进行前向传播（预测），得到一个先验状态。
-            // b. 利用高频的IMU位姿对LiDAR点云进行运动畸变校正。    
+            // b. 利用高频的IMU位姿对LiDAR点云进行运动畸变校正。 转化到世界位姿   
             p_imu->Process(Measures, kf, feats_undistort);//统一点云时间到Measures的结束时间
-            // 获取IMU预测后的状态，作为当前帧的位姿先验
+            // 获取IMU预测后的状态，作为当前帧的世界位姿先验
             state_point = kf.get_x();
             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
 
